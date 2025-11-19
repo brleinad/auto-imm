@@ -6,7 +6,7 @@
   "side_panel": {
     "default_path": "index.html"
   },
-  "permissions": ["sidePanel"],
+  "permissions": ["sidePanel", "storage", "unlimitedStorage"],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

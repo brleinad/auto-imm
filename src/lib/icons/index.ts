@@ -4,7 +4,7 @@
  * Import icons here to keep bundle size minimal and maintain consistency
  */
 
-export { 
+export {
   Home,
   Settings,
   HelpCircle,
@@ -31,6 +31,11 @@ export {
   Layers,
   Coffee,
   Heart,
+  Upload,
+  Trash2,
+  File,
+  Image,
+  FileText,
 } from '@lucide/svelte';
 
 // Re-export types
