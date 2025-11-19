@@ -19,12 +19,17 @@
     FileText,
   } from "../icons";
   import { formatFileSize, getStorageInfo } from "../utils/fileStorage";
-  import { isOCRSupported } from "../services/ocrService";
+  import { isOCRSupported, fillForm } from "../services/ocrApiService";
+  import { DEV_FORM_HTML } from "../constants/devFormHTML";
 
   let uploadStatus = $state<"idle" | "success" | "error">("idle");
   let errorMessage = $state("");
   let successMessage = $state("");
   let expandedOCRFiles = $state<Set<string>>(new Set());
+  let formFillStatus = $state<"idle" | "processing" | "success" | "error">(
+    "idle",
+  );
+  let formFillMessage = $state("");
 
   const storageInfo = getStorageInfo();
 
@@ -126,6 +131,144 @@
   function isTextFile(fileType: string): boolean {
     return fileType.startsWith("text/") || fileType.includes("document");
   }
+
+  async function handleFillForm() {
+    formFillStatus = "processing";
+    formFillMessage = "";
+
+    try {
+      // Get active tab
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+
+      if (!tab?.id) {
+        throw new Error("No active tab found");
+      }
+
+      // Get form HTML - use hardcoded dev HTML or query from page via content script
+      const isDev = import.meta.env.DEV;
+      let formHTML: string;
+
+      if (isDev) {
+        // Development mode: use hardcoded HTML
+        formHTML = DEV_FORM_HTML;
+        console.log("Using hardcoded dev form HTML");
+      } else {
+        // Production mode: get form HTML from page via content script
+        try {
+          const response = await chrome.tabs.sendMessage(tab.id, {
+            action: "getFormHTML",
+          });
+
+          if (chrome.runtime.lastError) {
+            throw new Error(
+              `Extension error: ${chrome.runtime.lastError.message}. Try reloading the page.`,
+            );
+          }
+
+          if (!response) {
+            throw new Error(
+              "No response from page. Try reloading the page and try again.",
+            );
+          }
+
+          if (!response.html) {
+            throw new Error(
+              response.error ||
+                "No form found on page. Make sure you're on a page with a form.",
+            );
+          }
+
+          formHTML = response.html;
+        } catch (err) {
+          if (
+            err instanceof Error &&
+            err.message.includes("Receiving end does not exist")
+          ) {
+            throw new Error(
+              "Content script not loaded. Please reload the page and try again.",
+            );
+          }
+          throw err;
+        }
+      }
+
+      // Collect all OCR text from uploaded files
+      const documentsExtractedText = $files
+        .filter((file) => file.ocrText)
+        .map((file) => `=== ${file.name} ===\n${file.ocrText}`)
+        .join("\n\n");
+
+      if (!documentsExtractedText) {
+        throw new Error(
+          "No OCR text available. Please upload and process documents first.",
+        );
+      }
+
+      // Call API to get field mappings
+      const apiResponse = await fillForm(formHTML, documentsExtractedText);
+
+      if (!apiResponse.fields || apiResponse.fields.length === 0) {
+        throw new Error(
+          "No matching fields found. Claude couldn't match document data to form fields.",
+        );
+      }
+
+      // Send field mappings to content script to fill the form
+      try {
+        const fillResponse = await chrome.tabs.sendMessage(tab.id, {
+          action: "fillFields",
+          fields: apiResponse.fields,
+        });
+
+        if (chrome.runtime.lastError) {
+          throw new Error(
+            `Extension error: ${chrome.runtime.lastError.message}`,
+          );
+        }
+
+        if (!fillResponse || !fillResponse.success) {
+          throw new Error(
+            fillResponse?.error || "Failed to fill form fields",
+          );
+        }
+
+        formFillStatus = "success";
+        formFillMessage = `Form filled successfully! ${fillResponse.filled} field(s) filled${fillResponse.failed > 0 ? `, ${fillResponse.failed} failed` : ""}.`;
+
+        console.log("Form filling complete:", {
+          total: apiResponse.fields.length,
+          filled: fillResponse.filled,
+          failed: fillResponse.failed,
+        });
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          err.message.includes("Receiving end does not exist")
+        ) {
+          throw new Error(
+            "Lost connection to page. Please reload the page and try again.",
+          );
+        }
+        throw err;
+      }
+
+      // Auto-clear success message after 5 seconds
+      setTimeout(() => {
+        if (formFillStatus === "success") {
+          formFillStatus = "idle";
+          formFillMessage = "";
+        }
+      }, 5000);
+    } catch (error) {
+      formFillStatus = "error";
+      formFillMessage =
+        error instanceof Error ? error.message : "Failed to fill form";
+      console.error("Form fill error:", error);
+    }
+  }
 </script>
 
 <div class="space-y-6">
@@ -147,6 +290,18 @@
       {#if successMessage}
         <div class="mt-2">{successMessage}</div>
       {/if}
+    </Alert>
+  {/if}
+
+  {#if formFillStatus === "success" && formFillMessage}
+    <Alert variant="success" showIcon>
+      {formFillMessage}
+    </Alert>
+  {/if}
+
+  {#if formFillStatus === "error" && formFillMessage}
+    <Alert variant="error" showIcon>
+      {formFillMessage}
     </Alert>
   {/if}
 
@@ -291,12 +446,24 @@
       {/snippet}
 
       {#snippet actions()}
-        <div class="flex gap-2">
+        <div class="flex gap-2 flex-wrap">
           {#if ocrSupportedCount > 0}
             {#if $ocrRunning}
               Processing OCR...
             {/if}
           {/if}
+          <Button
+            variant="primary"
+            onclick={handleFillForm}
+            disabled={formFillStatus === "processing" || $ocrRunning}
+            loading={formFillStatus === "processing"}
+          >
+            {#if formFillStatus === "processing"}
+              Filling Form...
+            {:else}
+              Fill Form
+            {/if}
+          </Button>
           <Button
             variant="error"
             outline

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image/jpeg"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"dev.danielrb/auto-imm/api/internal/request"
 	"dev.danielrb/auto-imm/api/internal/response"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -44,12 +46,13 @@ func (app *application) restricted(w http.ResponseWriter, r *http.Request) {
 
 // Helper function to extract text from a single image using Claude
 func (app *application) extractTextFromImageData(ctx context.Context, client anthropic.Client, base64Image string, mediaType string) (string, error) {
+	prompt := "Extract all text from this image. Translate to English and format the text in whatever format makes the most sense. Assume the image is a personal document like a passport."
 	message, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     "claude-sonnet-4-5",
 		MaxTokens: int64(app.config.anthropic.maxTokens),
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(
-				anthropic.NewTextBlock("Extract all text from this image. Return the text exactly as it appears, preserving formatting and structure."),
+				anthropic.NewTextBlock(prompt),
 				anthropic.NewImageBlockBase64(mediaType, base64Image),
 			),
 		},
@@ -227,7 +230,7 @@ func (app *application) processImageWithTesseract(imageData []byte) (string, err
 		return "", fmt.Errorf("invalid image format: %w", err)
 	}
 
-	// Extract text
+	// Extract textDashboard
 	text, err := client.Text()
 	if err != nil {
 		return "", fmt.Errorf("OCR processing failed: %w", err)
@@ -340,5 +343,144 @@ func (app *application) extractTextFromImageTesseract(w http.ResponseWriter, r *
 	_, err = w.Write([]byte(extractedText))
 	if err != nil {
 		app.logger.Error(err.Error())
+	}
+}
+
+func (app *application) fillForm(w http.ResponseWriter, r *http.Request) {
+	if app.config.anthropic.apiKey == "" {
+		app.serverError(w, r, errors.New("Anthropic API key not configured"))
+		return
+	}
+
+	// Parse request body
+	var input struct {
+		FormHTML              string `json:"formHTML"`
+		DocumentsExtractedText string `json:"documentsExtractedText"`
+	}
+
+	err := request.DecodeJSON(w, r, &input)
+	if err != nil {
+		app.badRequest(w, r, err)
+		return
+	}
+
+	// Validate inputs
+	if input.FormHTML == "" {
+		app.badRequest(w, r, errors.New("formHTML is required"))
+		return
+	}
+
+	if input.DocumentsExtractedText == "" {
+		app.badRequest(w, r, errors.New("documentsExtractedText is required"))
+		return
+	}
+
+	// Log both parameters
+	app.logger.Info("fillForm request received")
+	app.logger.Info("formHTML length", "bytes", len(input.FormHTML))
+	app.logger.Info("documentsExtractedText length", "bytes", len(input.DocumentsExtractedText))
+
+	// Create Claude prompt for form filling
+	prompt := fmt.Sprintf(`You are a form-filling assistant. Analyze this HTML form and extracted document text, then return a JSON mapping of form fields to values.
+
+FORM HTML:
+%s
+
+DOCUMENT TEXT:
+%s
+
+Your task:
+1. Identify all fillable form fields (inputs, selects, radio buttons) by their ID attribute
+2. Match document data to appropriate fields
+3. Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+
+{
+  "fields": [
+    {
+      "fieldId": "lastName_input",
+      "value": "Smith"
+    },
+    {
+      "fieldId": "year_sltDateYear",
+      "value": "1990"
+    }
+  ]
+}
+
+Rules:
+- Use exact field IDs from the HTML id attributes
+- For dates, parse and split into separate year/month/day fields
+- For gender radio buttons, use the exact value attribute (01=Female, 02=Male, 03=Unknown, 04=Another)
+- Only include fields where you found matching data
+- Return ONLY valid JSON, no additional text or formatting`, input.FormHTML, input.DocumentsExtractedText)
+
+	// Create Anthropic client
+	client := anthropic.NewClient(
+		option.WithAPIKey(app.config.anthropic.apiKey),
+	)
+	ctx := context.Background()
+
+	// Call Claude API
+	message, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     "claude-sonnet-4-5",
+		MaxTokens: int64(app.config.anthropic.maxTokens),
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(
+				anthropic.NewTextBlock(prompt),
+			),
+		},
+	})
+
+	if err != nil {
+		app.serverError(w, r, err)
+		return
+	}
+
+	// Extract text from response
+	var responseText string
+	for _, block := range message.Content {
+		if block.Type == "text" {
+			responseText += block.Text
+		}
+	}
+
+	app.logger.Info("Claude response received", "length", len(responseText))
+	app.logger.Debug("Claude response", "text", responseText)
+
+	// Clean up response (remove markdown code blocks if present)
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	// Parse JSON response
+	var fillResponse struct {
+		Fields []struct {
+			FieldID string `json:"fieldId"`
+			Value   string `json:"value"`
+		} `json:"fields"`
+	}
+
+	err = json.Unmarshal([]byte(responseText), &fillResponse)
+	if err != nil {
+		app.logger.Error("Failed to parse Claude response as JSON", "error", err.Error(), "response", responseText)
+		app.serverError(w, r, fmt.Errorf("failed to parse AI response: %w", err))
+		return
+	}
+
+	// Return field mappings
+	data := map[string]interface{}{
+		"status": "success",
+		"message": "Form filled successfully",
+		"fields": fillResponse.Fields,
+		"stats": map[string]int{
+			"totalFields": len(fillResponse.Fields),
+		},
+	}
+
+	err = response.JSON(w, http.StatusOK, data)
+	if err != nil {
+		app.serverError(w, r, err)
 	}
 }

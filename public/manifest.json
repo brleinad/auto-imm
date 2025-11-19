@@ -6,7 +6,15 @@
   "side_panel": {
     "default_path": "index.html"
   },
-  "permissions": ["sidePanel", "storage", "unlimitedStorage"],
+  "permissions": ["sidePanel", "storage", "unlimitedStorage", "activeTab", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

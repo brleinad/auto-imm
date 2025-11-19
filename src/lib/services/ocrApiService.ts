@@ -3,7 +3,7 @@
  * Handles text extraction from images using the backend API
  */
 
-import { apiPost, APIError } from './apiClient';
+import { apiPost, apiRequest, APIError } from './apiClient';
 
 /**
  * Extract text from an image file using the backend OCR API
@@ -58,4 +58,66 @@ export function isOCRSupported(fileType: string): boolean {
     'application/pdf',
   ];
   return supportedTypes.includes(fileType.toLowerCase());
+}
+
+/**
+ * Field mapping from Claude API
+ */
+export interface FieldMapping {
+  fieldId: string;
+  value: string;
+}
+
+/**
+ * Fill a form with extracted document text using the backend API
+ * @param formHTML - HTML string of the form to fill
+ * @param documentsExtractedText - Extracted text from documents
+ * @returns Promise resolving to the API response with field mappings
+ * @throws APIError if the request fails
+ */
+export async function fillForm(
+  formHTML: string,
+  documentsExtractedText: string
+): Promise<{
+  status: string;
+  message: string;
+  fields: FieldMapping[];
+  stats: {
+    totalFields: number;
+  };
+}> {
+  try {
+    // POST to /api/fill-form endpoint with JSON body
+    const response = await apiRequest<{
+      status: string;
+      message: string;
+      fields: FieldMapping[];
+      stats: {
+        totalFields: number;
+      };
+    }>('/api/fill-form', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        formHTML,
+        documentsExtractedText,
+      }),
+    });
+
+    return response;
+  } catch (error) {
+    if (error instanceof APIError) {
+      // Enhance error messages for common issues
+      if (error.status === 401) {
+        throw new APIError('Authentication failed. Check API credentials.');
+      } else if (error.message.includes('Network error')) {
+        throw new APIError(
+          'Cannot connect to form filling service. Make sure the backend server is running on http://localhost:3233'
+        );
+      }
+    }
+    throw error;
+  }
 }

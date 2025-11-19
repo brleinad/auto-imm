@@ -13,6 +13,7 @@ func (app *application) routes() http.Handler {
 	mux.Handle("GET /restricted-basic-auth", app.requireBasicAuthentication(http.HandlerFunc(app.restricted)))
 
 	mux.Handle("POST /api/ocr", app.requireBasicAuthentication(http.HandlerFunc(app.extractTextFromImage)))
+	mux.Handle("POST /api/fill-form", app.requireBasicAuthentication(http.HandlerFunc(app.fillForm)))
 	// mux.Handle("POST /api/ocr/tesseract", app.requireBasicAuthentication(http.HandlerFunc(app.extractTextFromImageTesseract)))
 
 	return app.enableCORS(app.logAccess(app.recoverPanic(mux)))
