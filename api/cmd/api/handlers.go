@@ -46,7 +46,7 @@ func (app *application) restricted(w http.ResponseWriter, r *http.Request) {
 
 // Helper function to extract text from a single image using Claude
 func (app *application) extractTextFromImageData(ctx context.Context, client anthropic.Client, base64Image string, mediaType string) (string, error) {
-	prompt := "Extract all text from this image. Translate to English and format the text in whatever format makes the most sense. Assume the image is a personal document like a passport."
+	prompt := "Extract all text from this image. Translate to English and format the text into json. Assume the image is a personal document like a passport. Return only the json. If you see the passport MRZ string then use that and decode it to get the correct values and remove the MRZ strings from the returned JSON."
 	message, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     "claude-sonnet-4-5",
 		MaxTokens: int64(app.config.anthropic.maxTokens),
@@ -354,7 +354,7 @@ func (app *application) fillForm(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var input struct {
-		FormHTML              string `json:"formHTML"`
+		FormHTML               string `json:"formHTML"`
 		DocumentsExtractedText string `json:"documentsExtractedText"`
 	}
 
@@ -382,11 +382,12 @@ func (app *application) fillForm(w http.ResponseWriter, r *http.Request) {
 
 	// Create Claude prompt for form filling
 	prompt := fmt.Sprintf(`You are a form-filling assistant. Analyze this HTML form and extracted document text, then return a JSON mapping of form fields to values.
+		Use only English and French letters Example: Aa, Bb, Cc and French accents such as é, è, ê, ë, û and special characters: hyphens, apostrophes, and spaces; cannot begin or end with a hyphen, apostrophe, or space. If your name has special letters or characters, use the letter without the accent.
 
 FORM HTML:
 %s
 
-DOCUMENT TEXT:
+DOCUMENT TEXT JSON:
 %s
 
 Your task:
@@ -398,19 +399,26 @@ Your task:
   "fields": [
     {
       "fieldId": "lastName_input",
+      "fieldType": "input",
       "value": "Smith"
     },
     {
       "fieldId": "year_sltDateYear",
+      "fieldType": "select",
       "value": "1990"
-    }
+    },
+		{
+      "fieldId": "codePassport_select",
+      "fieldType": "select",
+      "value": "131"
+		}
   ]
 }
 
 Rules:
 - Use exact field IDs from the HTML id attributes
 - For dates, parse and split into separate year/month/day fields
-- For gender radio buttons, use the exact value attribute (01=Female, 02=Male, 03=Unknown, 04=Another)
+- For radio buttons, use the exact value attribute (01=Female, 02=Male, 03=Unknown, 04=Another)
 - Only include fields where you found matching data
 - Return ONLY valid JSON, no additional text or formatting`, input.FormHTML, input.DocumentsExtractedText)
 
@@ -471,9 +479,9 @@ Rules:
 
 	// Return field mappings
 	data := map[string]interface{}{
-		"status": "success",
+		"status":  "success",
 		"message": "Form filled successfully",
-		"fields": fillResponse.Fields,
+		"fields":  fillResponse.Fields,
 		"stats": map[string]int{
 			"totalFields": len(fillResponse.Fields),
 		},
