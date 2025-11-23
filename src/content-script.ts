@@ -9,7 +9,7 @@ interface FieldMapping {
 }
 
 interface MessageRequest {
-  action: 'getFormHTML' | 'fillFields';
+  action: 'getFormHTML' | 'fillFields' | 'startWatchingForm' | 'stopWatchingForm';
   fields?: FieldMapping[];
 }
 
@@ -121,6 +121,18 @@ chrome.runtime.onMessage.addListener(
         return true; // Keep channel open
       }
 
+      if (request.action === 'startWatchingForm') {
+        const started = startWatchingForm();
+        sendResponse({ success: started });
+        return true;
+      }
+
+      if (request.action === 'stopWatchingForm') {
+        stopWatchingForm();
+        sendResponse({ success: true });
+        return true;
+      }
+
       // Unknown action
       sendResponse({ error: 'Unknown action' });
       return false;
@@ -131,5 +143,58 @@ chrome.runtime.onMessage.addListener(
     }
   }
 );
+
+// MutationObserver for watching form changes
+let formObserver: MutationObserver | null = null;
+let debounceTimer: number | null = null;
+
+function startWatchingForm() {
+  const form = document.querySelector('form');
+  if (!form) {
+    console.warn('No form found to watch');
+    return false;
+  }
+
+  // Stop existing observer if any
+  stopWatchingForm();
+
+  // Create new observer
+  formObserver = new MutationObserver((mutations) => {
+    // Debounce mutations - wait 500ms after last change
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+
+    debounceTimer = window.setTimeout(() => {
+      console.log('Form changed, notifying extension');
+      // Notify extension that form has changed
+      chrome.runtime.sendMessage({ action: 'formChanged' }).catch((err) => {
+        console.error('Error sending formChanged message:', err);
+      });
+    }, 500);
+  });
+
+  // Start observing
+  formObserver.observe(form, {
+    childList: true,
+    subtree: true,
+    attributes: false, // Don't watch attribute changes to avoid infinite loops
+  });
+
+  console.log('Started watching form for changes');
+  return true;
+}
+
+function stopWatchingForm() {
+  if (formObserver) {
+    formObserver.disconnect();
+    formObserver = null;
+  }
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  console.log('Stopped watching form');
+}
 
 console.log('Auto-Imm content script loaded');

@@ -30,16 +30,116 @@
     "idle",
   );
   let formFillMessage = $state("");
+  let fillAttempts = $state(0);
+  let isWatchingForm = $state(false);
+  const MAX_FILL_ATTEMPTS = 3;
 
   const storageInfo = getStorageInfo();
 
   onMount(() => {
     // Load files from storage on component mount
     initializeFiles();
+
+    // Listen for formChanged messages from content script
+    const messageListener = (
+      message: any,
+      sender: chrome.runtime.MessageSender,
+      sendResponse: (response?: any) => void
+    ) => {
+      if (message.action === "formChanged") {
+        console.log("Form changed notification received from content script");
+        handleFormChanged();
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(messageListener);
+
+    // Cleanup on unmount
+    return () => {
+      chrome.runtime.onMessage.removeListener(messageListener);
+      stopWatchingForm();
+    };
   });
 
   async function handleRunOCR() {
     await runOCROnAllFiles();
+  }
+
+  async function startWatchingForm() {
+    try {
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+
+      if (!tab?.id) {
+        console.warn("No active tab found, cannot start watching form");
+        return;
+      }
+
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        action: "startWatchingForm",
+      });
+
+      if (response?.success) {
+        isWatchingForm = true;
+        console.log("Started watching form for changes");
+      } else {
+        console.warn("Failed to start watching form");
+      }
+    } catch (error) {
+      console.error("Error starting form watcher:", error);
+    }
+  }
+
+  async function stopWatchingForm() {
+    if (!isWatchingForm) return;
+
+    try {
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+
+      if (!tab?.id) {
+        isWatchingForm = false;
+        return;
+      }
+
+      await chrome.tabs.sendMessage(tab.id, {
+        action: "stopWatchingForm",
+      });
+
+      isWatchingForm = false;
+      console.log("Stopped watching form");
+    } catch (error) {
+      console.error("Error stopping form watcher:", error);
+      isWatchingForm = false;
+    }
+  }
+
+  async function handleFormChanged() {
+    // Check if we've exceeded max attempts
+    if (fillAttempts >= MAX_FILL_ATTEMPTS) {
+      console.log(
+        `Max fill attempts (${MAX_FILL_ATTEMPTS}) reached, stopping watcher`,
+      );
+      await stopWatchingForm();
+      return;
+    }
+
+    // Check if we're already processing
+    if (formFillStatus === "processing") {
+      console.log("Form fill already in progress, ignoring change");
+      return;
+    }
+
+    console.log(
+      `Form changed, re-filling (attempt ${fillAttempts + 1}/${MAX_FILL_ATTEMPTS})`,
+    );
+
+    // Re-trigger form fill
+    await handleFillForm(true);
   }
 
   function toggleOCRText(fileId: string) {
@@ -132,7 +232,13 @@
     return fileType.startsWith("text/") || fileType.includes("document");
   }
 
-  async function handleFillForm() {
+  async function handleFillForm(isRefill: boolean = false) {
+    // Reset attempts on initial fill (not a refill)
+    if (!isRefill) {
+      fillAttempts = 0;
+      await stopWatchingForm(); // Stop any existing watcher
+    }
+
     formFillStatus = "processing";
     formFillMessage = "";
 
@@ -236,13 +342,23 @@
         }
 
         formFillStatus = "success";
-        formFillMessage = `Form filled successfully! ${fillResponse.filled} field(s) filled${fillResponse.failed > 0 ? `, ${fillResponse.failed} failed` : ""}.`;
+        const attemptInfo = isRefill ? ` (attempt ${fillAttempts + 1})` : "";
+        formFillMessage = `Form filled successfully! ${fillResponse.filled} field(s) filled${fillResponse.failed > 0 ? `, ${fillResponse.failed} failed` : ""}${attemptInfo}.`;
 
         console.log("Form filling complete:", {
           total: apiResponse.fields.length,
           filled: fillResponse.filled,
           failed: fillResponse.failed,
+          attempt: fillAttempts + 1,
         });
+
+        // Increment fill attempts
+        fillAttempts++;
+
+        // Start watching for form changes if this is the first fill and we haven't hit max attempts
+        if (fillAttempts === 1) {
+          await startWatchingForm();
+        }
       } catch (err) {
         if (
           err instanceof Error &&
@@ -267,6 +383,16 @@
       formFillMessage =
         error instanceof Error ? error.message : "Failed to fill form";
       console.error("Form fill error:", error);
+
+      // Increment attempts even on error
+      if (isRefill) {
+        fillAttempts++;
+      }
+
+      // Stop watcher if we hit max attempts
+      if (fillAttempts >= MAX_FILL_ATTEMPTS) {
+        await stopWatchingForm();
+      }
     }
   }
 </script>
